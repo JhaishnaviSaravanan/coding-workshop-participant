@@ -41,7 +41,9 @@ def _get_method(event):
 def _get_path(event):
     if not event:
         return ""
-    return event.get("rawPath") or event.get("path") or ""
+
+    path = event.get("rawPath") or event.get("path") or ""
+    return path.rstrip("/")
 
 
 def _health_response():
@@ -140,6 +142,8 @@ def handler(event=None, context=None):
     try:
         method = _get_method(event)
         path = _get_path(event)
+
+        logger.info("Resolved method=%s path=%s", method, path)
 
         if method == "OPTIONS":
             return success_response({"message": "CORS preflight ok"}, 200)
