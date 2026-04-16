@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import psycopg
 import jwt
@@ -6,6 +7,17 @@ import os
 from datetime import datetime, timedelta
 
 app = FastAPI(title="Auth API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-key")
 JWT_ALGORITHM = "HS256"
@@ -22,10 +34,28 @@ def get_db():
     )
 
 
+def get_current_user(authorization: str = Header(None)):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid Authorization header")
+
+    token = authorization.split(" ", 1)[1]
+
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+        
 class LoginRequest(BaseModel):
     email: str
     password: str
 
+class UserCreate(BaseModel):
+    employee_id: int
+    role: str
+    password: str
 
 @app.get("/auth-api")
 def root():
@@ -83,6 +113,63 @@ def login(data: LoginRequest):
                 "manager_id": manager_id,
                 "team": team
             }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/auth-api/users")
+def create_user(data: UserCreate, authorization: str = Header(None)):
+    user = get_current_user(authorization)
+
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Only admin can create users")
+
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                # Check employee exists
+                cur.execute(
+                    "SELECT id FROM employees WHERE id = %s",
+                    (data.employee_id,)
+                )
+                employee_row = cur.fetchone()
+
+                if not employee_row:
+                    raise HTTPException(status_code=404, detail="Employee not found")
+
+                # Check if user already exists for this employee
+                cur.execute(
+                    "SELECT employee_id FROM users WHERE employee_id = %s",
+                    (data.employee_id,)
+                )
+                existing_user = cur.fetchone()
+
+                if existing_user:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="User already exists for this employee"
+                    )
+
+                # Insert user
+                cur.execute("""
+                    INSERT INTO users (employee_id, password, role)
+                    VALUES (%s, %s, %s)
+                    RETURNING employee_id
+                """, (
+                    data.employee_id,
+                    data.password,
+                    data.role
+                ))
+                created_employee_id = cur.fetchone()[0]
+
+            conn.commit()
+
+        return {
+            "message": "User created successfully",
+            "employee_id": created_employee_id
         }
 
     except HTTPException:

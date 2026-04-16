@@ -1,3 +1,4 @@
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import psycopg
@@ -5,6 +6,17 @@ import jwt
 import os
 
 app = FastAPI(title="Review API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-key")
 JWT_ALGORITHM = "HS256"
