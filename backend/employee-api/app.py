@@ -1,39 +1,91 @@
+from fastapi import FastAPI, HTTPException, Header
+from pydantic import BaseModel
+import psycopg
+import jwt
 import os
-from fastapi import FastAPI, HTTPException
-from psycopg import connect
 
 app = FastAPI(title="Employee API")
 
-PG_CONFIG = (
-    f"host={os.getenv('POSTGRES_HOST', 'localhost')} "
-    f"port={os.getenv('POSTGRES_PORT', '5432')} "
-    f"user={os.getenv('POSTGRES_USER', 'postgres')} "
-    f"password={os.getenv('POSTGRES_PASS', 'postgres')} "
-    f"dbname={os.getenv('POSTGRES_NAME', 'employee_app')} "
-    f"connect_timeout=15"
-)
+JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-key")
+JWT_ALGORITHM = "HS256"
+
 
 def get_connection():
-    return connect(PG_CONFIG)
+    return psycopg.connect(
+        host=os.getenv("POSTGRES_HOST", "localhost"),
+        port=os.getenv("POSTGRES_PORT", "5432"),
+        user=os.getenv("POSTGRES_USER", "postgres"),
+        password=os.getenv("POSTGRES_PASS", "postgres"),
+        dbname=os.getenv("POSTGRES_NAME", "postgres")
+    )
 
-@app.get("/")
-def root():
-    return {"message": "Employee API is running", "service": "employee-api"}
+
+def get_current_user(authorization: str = Header(None)):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid Authorization header")
+
+    token = authorization.split(" ", 1)[1]
+
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+
+class EmployeeCreate(BaseModel):
+    name: str
+    email: str
+    department: str
+    role: str
+    team: str
+    manager_id: int | None = None
+
 
 @app.get("/employee-api")
 def health():
     return {"message": "Employee API is running", "service": "employee-api"}
 
+
 @app.get("/employee-api/employees")
-def get_employees():
+def get_employees(authorization: str = Header(None)):
+    user = get_current_user(authorization)
+    role = user["role"]
+    actor_employee_id = user["employee_id"]
+
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT id, name, email, department, role, team, manager_id
-                    FROM employees
-                    ORDER BY id;
-                """)
+                if role == "admin":
+                    cur.execute("""
+                        SELECT id, name, email, department, role, team, manager_id
+                        FROM employees
+                        ORDER BY id
+                    """)
+                elif role == "hr":
+                    cur.execute("""
+                        SELECT id, name, email, department, role, team, manager_id
+                        FROM employees
+                        ORDER BY id
+                    """)
+                elif role == "manager":
+                    cur.execute("""
+                        SELECT id, name, email, department, role, team, manager_id
+                        FROM employees
+                        WHERE manager_id = %s OR id = %s
+                        ORDER BY id
+                    """, (actor_employee_id, actor_employee_id))
+                elif role == "employee":
+                    cur.execute("""
+                        SELECT id, name, email, department, role, team, manager_id
+                        FROM employees
+                        WHERE id = %s
+                    """, (actor_employee_id,))
+                else:
+                    raise HTTPException(status_code=403, detail="Access denied")
+
                 rows = cur.fetchall()
 
         return [
@@ -48,74 +100,37 @@ def get_employees():
             }
             for row in rows
         ]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-@app.get("/employee-api/debug-db")
-def debug_db():
-    return {
-        "POSTGRES_HOST": os.getenv("POSTGRES_HOST"),
-        "POSTGRES_PORT": os.getenv("POSTGRES_PORT"),
-        "POSTGRES_NAME": os.getenv("POSTGRES_NAME"),
-        "POSTGRES_USER": os.getenv("POSTGRES_USER"),
-    }
-    
-@app.get("/employee-api/reviews")
-def get_reviews():
+
+@app.post("/employee-api/employees")
+def create_employee(data: EmployeeCreate, authorization: str = Header(None)):
+    user = get_current_user(authorization)
+
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Only admin can create employees")
+
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT id, employee_id, review_date, rating, feedback, goals
-                    FROM performance_reviews
-                    ORDER BY review_date DESC;
-                """)
-                rows = cur.fetchall()
+                    INSERT INTO employees (name, email, department, role, team, manager_id)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (
+                    data.name,
+                    data.email,
+                    data.department,
+                    data.role,
+                    data.team,
+                    data.manager_id
+                ))
+                employee_id = cur.fetchone()[0]
+            conn.commit()
 
-        return [
-            {
-                "id": row[0],
-                "employee_id": row[1],
-                "review_date": str(row[2]),
-                "rating": row[3],
-                "feedback": row[4],
-                "goals": row[5],
-            }
-            for row in rows
-        ]
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-
-@app.get("/employee-api/analytics/high-potential")
-def get_high_potential():
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT 
-                        e.id,
-                        e.full_name,
-                        AVG(pr.rating) AS avg_rating,
-                        COUNT(pr.id) AS review_count
-                    FROM employees e
-                    JOIN performance_reviews pr ON e.id = pr.employee_id
-                    GROUP BY e.id, e.full_name
-                    HAVING AVG(pr.rating) >= 4
-                    ORDER BY avg_rating DESC;
-                """)
-                rows = cur.fetchall()
-
-        return [
-            {
-                "employee_id": row[0],
-                "name": row[1],
-                "avg_rating": float(row[2]),
-                "review_count": row[3],
-                "status": "High Potential"
-            }
-            for row in rows
-        ]
-
+        return {"message": "Employee created successfully", "employee_id": employee_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
